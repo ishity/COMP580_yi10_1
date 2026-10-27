@@ -1,0 +1,13 @@
+_ > nanoagent.plugin.v0001.ProductConfig:
+tagline: "Find similar keyword pairs with SimHash LSH on a budget"
+summary: "Pick a bundled set of NLP keywords and a similarity threshold, and an agent finds the keyword pairs whose embeddings are at least that similar. It uses SimHash LSH to choose which pairs to score, and may score only a fixed number of them, so it has to pick its hashing parameters well. Every answer is checked in exact arithmetic against a brute-force reference."
+highlights:
+  - "Exact integer and fraction arithmetic decides every pair, so no answer hinges on floating-point rounding"
+  - "A scoring budget far below the number of pairs makes the LSH parameters matter"
+  - "The verifier checks precision, recall, the budget and that every submitted pair was really scored"
+  - "Runs offline on bundled data"
+steps:
+  - "Choose a dataset, a threshold such as 0.80, a budget and the recall you require"
+  - "The agent picks bits per band and bands, and hashes the keywords into ranked candidate pairs"
+  - "It scores the best ranked candidates within the budget and collects the pairs that qualify"
+  - "It submits them, and the verdict shows the recall it reached"

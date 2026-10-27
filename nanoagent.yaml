@@ -1,0 +1,42 @@
+_ > nanoagent.plugin.v0001.ManifestConfig:
+id: lsh-similar-pairs
+name: LSH Similar Pairs
+version: 0.1.0
+status: ready
+spec: nanoagent.plugin/v0001
+
+runtime > nanoagent.plugin.v0001.RuntimeConfig:
+  type: mcp_stdio
+  command: [uv, run, --frozen, python, -m, plugin]
+
+permissions > nanoagent.plugin.v0001.PermissionsConfig:
+  network > nanoagent.plugin.v0001.NetworkConfig:
+    hosts: []
+  filesystem > nanoagent.plugin.v0001.FilesystemConfig:
+    write: [workspace]
+
+# One entry per contract.Tool; its input and output classes are contract.TOOLS's.
+tools > dict[contract.Tool, nanoagent.plugin.v0001.ToolConfig]:
+  describe_dataset:
+    description: Count a bundled dataset's keywords and pairs, its vector dimension and the hyperplanes LSH may use
+  lsh_candidates:
+    description: Hash a dataset's keywords with SimHash LSH, save the candidate pairs ranked by matched bands, and return their count and histogram
+  score_pairs:
+    description: Score a rank range of an LSH run with the exact cosine rule, within the budget, and return the qualifying pairs
+  exact_pairs:
+    description: Find every qualifying pair of a dataset by brute force, the task's reference
+
+# One entry per contract.Task; its input and output classes are contract.TASKS's.
+tasks > dict[contract.Task, nanoagent.plugin.v0001.TaskConfig]:
+  find-similar-pairs:
+    description: Find every keyword pair at least as similar as a threshold, within a scoring budget
+    runner: agent
+    tools: [describe_dataset, lsh_candidates, score_pairs]
+    reference: exact_pairs
+    instructions: |-
+      Find every pair of keywords in the dataset whose cosine similarity is at least threshold, while score_pairs scores at most budget distinct pairs in all. Scoring every pair is far over budget, so SimHash LSH chooses which pairs to score.
+      Start with describe_dataset: it gives the keyword count, the vector dimension, how many hyperplanes LSH may use, and how many pairs there are.
+      Then call lsh_candidates with bits_per_band and bands. Each hyperplane gives each keyword one sign bit. A band is bits_per_band consecutive bits, and its bits are the keyword's signature for that band. A pair is a candidate when its two keywords share the signature of at least one band. More bits per band make every band stricter, so fewer and more similar pairs match; more bands give each similar pair more chances to match, so more pairs match. Two keywords at cosine c share one sign bit with probability 1 - arccos(c)/π, so a band of b bits matches with that probability to the power b. bits_per_band times bands may not exceed the hyperplanes. The candidates are saved in the workspace, ranked by how many bands they share, most first, because pairs that share more bands tend to be more similar. You get back the run_id, how many candidates there are, and a histogram: for each number of shared bands, how many candidates share exactly that many and their rank range; first_rank and last_rank give that rank range.
+      A run may have far more candidates than the budget: scoring its top ranks spends the budget on the pairs most likely to qualify. Score candidates with score_pairs: pass the run_id, a rank range (start_rank, from 1, and count), and the task's dataset, threshold and budget exactly as given. Only pairs no earlier call scored are scored and charged; it returns the qualifying ones, how many pairs it scored and skipped, and how much budget remains. A range holding more new pairs than the budget allows is refused, and the error says the largest count that fits.
+      While budget remains, you may score further ranks, or run lsh_candidates with other bits_per_band and bands and score that run's ranks; pairs already scored are skipped at no cost.
+      Submit every pair any score_pairs call returned as qualifying, each once, with a and b exactly as returned. Submit no other pair: a pair that does not qualify makes the answer wrong, and the answer passes only when it holds at least min_recall of all qualifying pairs. If no score_pairs call returned a qualifying pair, submit an empty list: that is the correct answer when no pair qualifies.
