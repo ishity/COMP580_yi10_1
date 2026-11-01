@@ -6,7 +6,6 @@ from pathlib import Path
 
 from .rule import DECIMAL_RULE, parse_decimal, qualifies
 
-LEDGER = "score_ledger.json"
 CANDIDATES = "candidates"
 HYPERPLANES = 256  # how many hyperplanes src/plugin/data/hyperplanes.json holds
 

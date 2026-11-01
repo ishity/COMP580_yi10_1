@@ -12,7 +12,6 @@ from contract import Dataset
 from plugin.rule import DECIMAL_RULE, parse_decimal
 
 DATA = Path(__file__).with_name("data")
-LEDGER = "score_ledger.json"
 CANDIDATES = "candidates"
 
 

@@ -2,7 +2,6 @@ from pathlib import Path
 
 from .checks import (
     CANDIDATES,
-    LEDGER,
     decimal_problem,
     qualifying_problem,
     read_json,
@@ -10,6 +9,7 @@ from .checks import (
     run_id_problem,
     scored,
 )
+from .ledgers import ledger_path
 from .rule import parse_decimal
 
 
@@ -25,7 +25,8 @@ def verify_input(value):
 
 
 def verify_output(input_value, output_value, workspace):
-    ledger = read_json(Path(workspace) / LEDGER)
+    threshold = parse_decimal(input_value.threshold)
+    ledger = read_json(ledger_path(workspace, input_value.dataset.value, threshold, input_value.budget))
     if ledger is None or not ledger["calls"]:
         return result(False, "score_pairs left no record of its call in the ledger")
     if (ledger["dataset"], parse_decimal(ledger["threshold"]), ledger["budget"]) != (
@@ -57,12 +58,15 @@ def verify_output(input_value, output_value, workspace):
     qualifying = [scored(pair) for pair in output_value.qualifying]
     if qualifying != call["qualifying"]:
         return result(False, "the qualifying pairs differ from the ledger's")
+    recorded = {(pair["a"], pair["b"]): pair for past in earlier for pair in past["qualifying"]}
+    previously = [recorded[pair] for pair in span if pair in seen and pair in recorded]
+    if [scored(pair) for pair in output_value.previously_qualifying] != previously:
+        return result(False, "previously_qualifying is not the range's skipped pairs that earlier calls found qualifying")
     order = {pair: rank for rank, pair in enumerate(new)}
     ranks = [order.get((pair["a"], pair["b"])) for pair in qualifying]
     if None in ranks or ranks != sorted(set(ranks)):
         return result(False, "the qualifying pairs are not newly scored pairs of the range, in rank order")
-    threshold = parse_decimal(input_value.threshold)
-    for pair in qualifying:
+    for pair in qualifying + previously:
         problem = qualifying_problem(pair, threshold)
         if problem:
             return result(False, problem)
@@ -71,4 +75,10 @@ def verify_output(input_value, output_value, workspace):
         return result(False, f"{total} distinct pairs are scored: total_scored or remaining disagree")
     if total > input_value.budget:
         return result(False, f"{total} distinct pairs are scored, over the budget of {input_value.budget}")
-    return result(True, "the range is scored within budget", scored=len(new), qualifying=len(qualifying))
+    return result(
+        True,
+        "the range is scored within budget",
+        scored=len(new),
+        qualifying=len(qualifying),
+        previously_qualifying=len(previously),
+    )

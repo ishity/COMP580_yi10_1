@@ -1,8 +1,9 @@
 """score_pairs: score a rank range of an LSH run with the exact rule, within the task's budget.
 
-Every call is recorded in score_ledger.json in the workspace. The first call fixes the ledger's dataset,
-threshold and budget; later calls must pass the same. A pair any earlier call scored is skipped, neither
-scored nor charged again, so the budget counts distinct pairs.
+Every call is recorded in the workspace's ledger for the task instance, ledgers/<dataset>-<threshold>-<budget>.json
+(see plugin.ledgers), so different instances never share a ledger. A pair any earlier call scored, in this run or
+an earlier run of the same instance, is skipped, neither scored nor charged again, so the budget counts distinct
+pairs; the skipped pairs that qualified come back as previously_qualifying, with the integers recorded then.
 """
 
 from __future__ import annotations
@@ -12,22 +13,22 @@ import re
 from pathlib import Path
 
 from contract import ScoredPair, ScoreInput, ScoreOutput
-from plugin.bundle import LEDGER, candidates_path, decimal, dot, load
+from plugin.bundle import candidates_path, decimal, dot, load
+from plugin.ledgers import ledger_path
 from plugin.rule import parse_decimal, qualifies
 
 
-def _ledger(given: ScoreInput, workspace: Path) -> dict:
-    """The ledger so far, or a new one fixing this call's dataset, threshold and budget."""
-    path = workspace / LEDGER
+def _ledger(given: ScoreInput, path: Path) -> dict:
+    """The instance's ledger so far, or a new one fixing this call's dataset, threshold and budget."""
     if not path.exists():
         return {"dataset": given.dataset.value, "threshold": given.threshold, "budget": given.budget, "calls": []}
     ledger = json.loads(path.read_text())
-    if ledger["dataset"] != given.dataset.value:
-        raise ValueError(f"this task's ledger is for dataset {ledger['dataset']}: pass dataset {ledger['dataset']}")
-    if parse_decimal(ledger["threshold"]) != decimal(given.threshold, "threshold"):
-        raise ValueError(f"this task's ledger is for threshold {ledger['threshold']!r}: pass that threshold")
-    if ledger["budget"] != given.budget:
-        raise ValueError(f"this task's ledger is for budget {ledger['budget']}: pass budget {ledger['budget']}")
+    if (ledger["dataset"], parse_decimal(ledger["threshold"]), ledger["budget"]) != (
+        given.dataset.value,
+        decimal(given.threshold, "threshold"),
+        given.budget,
+    ):
+        raise ValueError(f"ledger {path.name} records another dataset, threshold or budget than its name says")
     return ledger
 
 
@@ -55,12 +56,14 @@ def score_pairs(given: ScoreInput, workspace: Path) -> ScoreOutput:
             f" with start_rank {first}, count may be at most {len(candidates) - first + 1}"
         )
 
-    ledger = _ledger(given, workspace)
+    path = ledger_path(workspace, given.dataset.value, threshold, given.budget)
+    ledger = _ledger(given, path)
     seen = {(a, b) for call in ledger["calls"] for a, b in call["scored"]}
     remaining = given.budget - len(seen)
     span = [(a, b) for a, b, _ in candidates[first - 1 : last]]
     new = [pair for pair in span if pair not in seen]
     if len(new) > remaining:
+        earlier_runs = sorted({call["run_id"] for call in ledger["calls"]})
         fits, fresh = 0, 0
         for pair in span:
             fresh += pair not in seen
@@ -70,7 +73,9 @@ def score_pairs(given: ScoreInput, workspace: Path) -> ScoreOutput:
         raise ValueError(
             f"ranks {first} to {last} hold {len(new)} pairs not yet scored ({len(span) - len(new)} already scored),"
             f" but only {remaining} of the budget {given.budget} remain: with start_rank {first},"
-            f" count may be at most {fits}" + ("; the budget is used up, so submit what you found" if not remaining else "")
+            f" count may be at most {fits}"
+            + ("; the budget is used up" if not remaining else "")
+            + (f"; ranges already scored, in runs {', '.join(earlier_runs)}, cost nothing" if earlier_runs else "")
         )
 
     data = load(given.dataset)
@@ -91,12 +96,16 @@ def score_pairs(given: ScoreInput, workspace: Path) -> ScoreOutput:
             ],
         }
     )
-    (workspace / LEDGER).write_text(json.dumps(ledger) + "\n")
+    recorded = {(pair["a"], pair["b"]): pair for call in ledger["calls"][:-1] for pair in call["qualifying"]}
+    previously = [ScoredPair(**recorded[pair]) for pair in span if pair in seen and pair in recorded]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(ledger) + "\n")
     total = len(seen) + len(new)
     return ScoreOutput(
         qualifying=qualifying,
         scored=len(new),
         skipped=len(span) - len(new),
+        previously_qualifying=previously,
         total_scored=total,
         remaining=given.budget - total,
     )

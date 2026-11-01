@@ -9,10 +9,12 @@ import pytest
 from slimconfig import build_output, plain_output
 
 import verifier
+import verifier.ledgers
 import verifier.rule
 from contract import TOOLS, Dataset, DescribeInput, FindInput, LshInput, ScoreInput, Tool
 from plugin import describe_dataset, exact_pairs, lsh_candidates, rule, score_pairs
-from plugin.bundle import LEDGER, hyperplanes, load
+from plugin.bundle import hyperplanes, load
+from plugin.ledgers import ledger_path
 
 ROOT = Path(__file__).resolve().parents[1]
 THRESHOLDS = ["0.001", "0.5", "0.6", "0.7", "0.70", "0.707", "0.708", "0.8", "0.80", "0.801", "0.9", "0.90", "0.96", "1"]
@@ -59,8 +61,9 @@ def test_lsh_candidates_refuses_impossible_parameters(tmp_path: Path, bits: int,
         lsh_candidates(LshInput(dataset=Dataset.EDGE_CASES, bits_per_band=bits, bands=bands), tmp_path)
 
 
-def test_the_two_rule_files_are_identical() -> None:
-    assert (ROOT / "src/plugin/rule.py").read_text() == (ROOT / "verifier/rule.py").read_text()
+@pytest.mark.parametrize("module", ["rule.py", "ledgers.py"])
+def test_the_shared_files_are_identical(module: str) -> None:
+    assert (ROOT / "src/plugin" / module).read_text() == (ROOT / "verifier" / module).read_text()
 
 
 def test_tool_and_verifier_rules_agree_on_every_edge_case_pair() -> None:
@@ -133,7 +136,7 @@ def test_score_pairs_refuses_a_range_over_budget_and_says_what_fits(run: Path) -
     with pytest.raises(ValueError, match=r"hold 20 pairs not yet scored \(0 already scored\), but only 10 of the budget"
                        r" 10 remain: with start_rank 1, count may be at most 10"):
         score(run, 1, 20)
-    assert not (run / LEDGER).exists()
+    assert not (run / "ledgers").exists()
     given, made = score(run, 1, 10)
     assert (made.scored, made.skipped, made.total_scored, made.remaining) == (10, 0, 10, 0)
     assert checked(Tool.SCORE_PAIRS, given, made, run)["valid"] is True
@@ -149,17 +152,56 @@ def test_score_pairs_charges_only_new_pairs(run: Path) -> None:
     given, made = score(run, 3, 5)
     assert (made.scored, made.skipped, made.total_scored, made.remaining) == (3, 2, 7, 3)
     assert checked(Tool.SCORE_PAIRS, given, made, run)["valid"] is True
-    ledger = json.loads((run / LEDGER).read_text())
+    ledger = json.loads(ledger_path(run, "edge-cases", Fraction("0.9"), 10).read_text())
     assert [len(call["scored"]) for call in ledger["calls"]] == [4, 3]
 
 
-def test_score_pairs_keeps_the_ledger_fixed(run: Path) -> None:
+def test_each_instance_has_its_own_ledger(run: Path) -> None:
     score(run, 1, 2, threshold="0.9")
-    score(run, 3, 2, threshold="0.90")
-    with pytest.raises(ValueError, match="pass budget 10"):
-        score(run, 5, 1, budget=11)
-    with pytest.raises(ValueError, match="for threshold '0.9'"):
-        score(run, 5, 1, threshold="0.8")
+    _, made = score(run, 3, 2, threshold="0.90")
+    assert made.total_scored == 4  # 0.9 and 0.90 are one threshold, so one ledger
+    _, made = score(run, 1, 2, budget=11)
+    assert (made.scored, made.total_scored) == (2, 2)
+    _, made = score(run, 1, 2, threshold="0.8")
+    assert (made.scored, made.total_scored) == (2, 2)
+    names = sorted(path.name for path in (run / "ledgers").iterdir())
+    assert names == ["edge-cases-0.800-10.json", "edge-cases-0.900-10.json", "edge-cases-0.900-11.json"]
+
+
+@pytest.mark.parametrize(
+    ("dataset", "threshold", "budget", "name"),
+    [("nlp-large", "0.8", 3000, "nlp-large-0.800-3000.json"), ("edge-cases", "1", 190, "edge-cases-1.000-190.json"),
+     ("nlp-small", "0.705", 1, "nlp-small-0.705-1.json")],
+)
+def test_ledger_names_write_the_threshold_to_3_places(dataset: str, threshold: str, budget: int, name: str) -> None:
+    assert ledger_path(Path("w"), dataset, Fraction(threshold), budget) == Path("w/ledgers") / name
+    assert verifier.ledgers.ledger_path(Path("w"), dataset, Fraction(threshold), budget) == Path("w/ledgers") / name
+
+
+def test_score_pairs_refuses_a_ledger_whose_contents_contradict_its_name(run: Path) -> None:
+    score(run, 1, 2)
+    path = ledger_path(run, "edge-cases", Fraction("0.9"), 10)
+    path.write_text(json.dumps(json.loads(path.read_text()) | {"budget": 11}))
+    with pytest.raises(ValueError, match="records another dataset, threshold or budget than its name says"):
+        score(run, 3, 1)
+
+
+def test_a_rerun_gets_back_the_qualifying_pairs_it_skips(run: Path) -> None:
+    given, first = score(run, 1, 30, budget=190)
+    assert first.qualifying and first.previously_qualifying == []
+    lsh_candidates(LshInput(dataset=Dataset.EDGE_CASES, bits_per_band=1, bands=64), run)  # the rerun's own call
+    given, again = score(run, 1, 40, budget=190)
+    assert (again.scored, again.skipped) == (10, 30)
+    assert again.previously_qualifying == first.qualifying  # the same pairs, with the same integers
+    assert checked(Tool.SCORE_PAIRS, given, again, run)["valid"] is True
+    again.previously_qualifying.pop()
+    assert checked(Tool.SCORE_PAIRS, given, again, run)["valid"] is False
+
+
+def test_a_refusal_names_the_runs_already_scored(run: Path) -> None:
+    score(run, 1, 10)
+    with pytest.raises(ValueError, match="the budget is used up; ranges already scored, in runs edge-cases-1x64, cost"):
+        score(run, 5, 7)
 
 
 @pytest.mark.parametrize(

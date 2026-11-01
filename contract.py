@@ -100,6 +100,11 @@ class ScoreOutput(Output):
     qualifying: Annotated[list[ScoredPair], "The newly scored pairs in the range that qualify, in rank order"]
     scored: Annotated[int, "How many pairs in the range were scored now and charged to the budget"]
     skipped: Annotated[int, "How many pairs in the range were scored by an earlier call, so not scored or charged again"]
+    previously_qualifying: Annotated[
+        list[ScoredPair],
+        "The skipped pairs in the range that qualify, as the earlier call recorded them, possibly in an earlier run"
+        " of this same task, in rank order: submit them like qualifying",
+    ]
     total_scored: Annotated[int, "How many distinct pairs all calls so far have scored"]
     remaining: Annotated[int, "How many more pairs the budget allows"]
 

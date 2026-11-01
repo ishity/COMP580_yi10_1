@@ -4,9 +4,9 @@ The first failing check decides: malformed pairs, the budget, precision, provena
 """
 
 from fractions import Fraction
-from pathlib import Path
 
-from .checks import LEDGER, qualifying_problem, read_json, result, scored
+from .checks import qualifying_problem, read_json, result, scored
+from .ledgers import ledger_name, ledger_path
 from .rule import parse_decimal
 
 
@@ -31,17 +31,18 @@ def verify_task(arguments, output, reference, workspace):
     if len(set(submitted)) != len(submitted):
         return result(False, "a pair is submitted twice, counting (a, b) and (b, a) as one pair")
 
-    # 2. Budget: the ledger is this task's, and its distinct scored pairs are within the budget.
-    ledger = read_json(Path(workspace) / LEDGER)
+    # 2. Budget: the instance's own ledger, named by its dataset, threshold and budget, stays within the budget.
+    ledger = read_json(ledger_path(workspace, arguments.dataset.value, threshold, arguments.budget))
     calls = [] if ledger is None else ledger["calls"]
     if ledger is None and submitted:
-        return result(False, f"there is no {LEDGER}, so no submitted pair was scored")
+        name = ledger_name(arguments.dataset.value, threshold, arguments.budget)
+        return result(False, f"there is no ledger {name}, so no submitted pair was scored")
     if ledger is not None and (ledger["dataset"], parse_decimal(ledger["threshold"]), ledger["budget"]) != (
         arguments.dataset.value,
         threshold,
         arguments.budget,
     ):
-        return result(False, "the ledger is for another dataset, threshold or budget than the task")
+        return result(False, "the ledger records another dataset, threshold or budget than the task")
     pairs_scored = [tuple(pair) for call in calls for pair in call["scored"]]
     if len(set(pairs_scored)) != len(pairs_scored):
         return result(False, "the ledger scores a pair twice")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,17 @@ from slimconfig import build_output, plain_output
 import verifier
 from contract import TASKS, TOOLS, Dataset, ExactOutput, FindInput, LshInput, ScoreInput, Task, Tool
 from plugin import exact_pairs, lsh_candidates, score_pairs
-from plugin.bundle import LEDGER
+from plugin.ledgers import ledger_path
 
 EDGE = {"dataset": "edge-cases", "threshold": "0.90", "budget": 190, "min_recall": "1.0"}
 EMPTY = {"dataset": "nlp-small", "threshold": "0.90", "budget": 500, "min_recall": "1.0"}
+SMALL = {"dataset": "nlp-small", "threshold": "0.80", "budget": 2000, "min_recall": "0.90"}
 EXACT_COSINE = {"a": "base", "b": "cos-0.90-with-base"}
+
+
+def ledger_of(workspace: Path, arguments: dict) -> Path:
+    """The instance's ledger in ``workspace``."""
+    return ledger_path(workspace, arguments["dataset"], Fraction(arguments["threshold"]), arguments["budget"])
 
 
 # The verifier gets contract instances, as NanoAgent's sandbox builds them from JSON.
@@ -55,7 +62,7 @@ def scored(workspace: Path, arguments: dict, last_rank: int | None = None, bits:
         ),
         workspace,
     )
-    return [{"a": pair.a, "b": pair.b} for pair in made.qualifying]
+    return [{"a": pair.a, "b": pair.b} for pair in made.qualifying + made.previously_qualifying]
 
 
 @pytest.fixture
@@ -121,8 +128,8 @@ def test_refuses_a_malformed_pair(tmp_path: Path, edge: list[dict], pair: dict, 
 
 
 def test_refuses_a_ledger_over_the_budget(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
-    (tmp_path / LEDGER).write_text(json.dumps(ledger | {"budget": 100}))
+    ledger = json.loads(ledger_of(tmp_path, EDGE).read_text())
+    ledger_of(tmp_path, EDGE | {"budget": 100}).write_text(json.dumps(ledger | {"budget": 100}))
     verdict = verify_task(EDGE | {"budget": 100}, edge, tmp_path, task=EDGE)
     assert verdict["valid"] is False and "186 distinct pairs were scored, over the budget of 100" in verdict["message"]
 
@@ -130,23 +137,31 @@ def test_refuses_a_ledger_over_the_budget(tmp_path: Path, edge: list[dict]) -> N
 @pytest.mark.parametrize(
     "changes", [{"budget": 500}, {"threshold": "0.80"}, {"dataset": "nlp-small"}], ids=["budget", "threshold", "dataset"]
 )
-def test_refuses_a_ledger_of_another_task(tmp_path: Path, edge: list[dict], changes: dict) -> None:
-    verdict = verify_task(EDGE | changes, [], tmp_path)
-    assert verdict["valid"] is False and "the ledger is for another" in verdict["message"]
+def test_refuses_a_ledger_that_records_another_task(tmp_path: Path, edge: list[dict], changes: dict) -> None:
+    ledger = json.loads(ledger_of(tmp_path, EDGE).read_text())
+    ledger_of(tmp_path, EDGE).write_text(json.dumps(ledger | changes))
+    verdict = verify_task(EDGE, edge, tmp_path)
+    assert verdict["valid"] is False and "the ledger records another" in verdict["message"]
+
+
+def test_another_instance_does_not_see_the_ledger(tmp_path: Path, edge: list[dict]) -> None:
+    for changes in ({"budget": 500}, {"threshold": "0.80"}):
+        verdict = verify_task(EDGE | changes, edge[:1], tmp_path)
+        assert verdict["valid"] is False and "there is no ledger edge-cases-" in verdict["message"]
 
 
 def test_refuses_a_ledger_that_scores_a_pair_twice(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
+    ledger = json.loads(ledger_of(tmp_path, EDGE).read_text())
     ledger["calls"].append(ledger["calls"][0] | {"qualifying": []})
-    (tmp_path / LEDGER).write_text(json.dumps(ledger))
+    ledger_of(tmp_path, EDGE).write_text(json.dumps(ledger))
     verdict = verify_task(EDGE, edge, tmp_path)
     assert verdict["valid"] is False and "scores a pair twice" in verdict["message"]
 
 
 def test_refuses_pairs_without_a_ledger(tmp_path: Path, edge: list[dict]) -> None:
-    (tmp_path / LEDGER).unlink()
+    ledger_of(tmp_path, EDGE).unlink()
     verdict = verify_task(EDGE, edge, tmp_path)
-    assert verdict["valid"] is False and f"no {LEDGER}" in verdict["message"]
+    assert verdict["valid"] is False and "no ledger edge-cases-0.900-190.json" in verdict["message"]
 
 
 def test_refuses_a_qualifying_pair_that_was_never_scored(tmp_path: Path) -> None:
@@ -164,9 +179,9 @@ def test_refuses_a_qualifying_pair_that_was_never_scored(tmp_path: Path) -> None
 
 
 def test_refuses_a_pair_recorded_with_other_integers(tmp_path: Path, edge: list[dict]) -> None:
-    ledger = json.loads((tmp_path / LEDGER).read_text())
+    ledger = json.loads(ledger_of(tmp_path, EDGE).read_text())
     ledger["calls"][0]["qualifying"][0]["norm_a"] -= 1
-    (tmp_path / LEDGER).write_text(json.dumps(ledger))
+    ledger_of(tmp_path, EDGE).write_text(json.dumps(ledger))
     verdict = verify_task(EDGE, edge, tmp_path)
     assert verdict["valid"] is False and "other integers" in verdict["message"]
 
@@ -205,3 +220,24 @@ def test_checks_what_the_types_cannot_say(tool: Tool, value: dict, valid: bool) 
 def test_checks_a_score_call(changes: dict, valid: bool) -> None:
     value = {"dataset": "nlp-small", "run_id": "nlp-small-6x32", "start_rank": 1, "count": 100}
     assert verify_input(Tool.SCORE_PAIRS, value | {"threshold": "0.80", "budget": 2000} | changes)["valid"] is valid
+
+
+# NanoAgent copies a member's workspace files into every run and back, so one workspace sees many runs.
+def test_two_instances_share_a_workspace(tmp_path: Path, edge: list[dict]) -> None:
+    assert scored(tmp_path, EDGE)[0] in edge  # edge-cases' budget is used up, yet nlp-small is not locked
+    found = scored(tmp_path, SMALL, last_rank=SMALL["budget"], bits=6, bands=16)
+    assert verify_task(SMALL, found, tmp_path)["valid"] is True
+    assert verify_task(EDGE, edge, tmp_path)["valid"] is True
+    assert sorted(path.name for path in (tmp_path / "ledgers").iterdir()) == [
+        "edge-cases-0.900-190.json",
+        "nlp-small-0.800-2000.json",
+    ]
+
+
+def test_the_same_instance_passes_when_run_again(tmp_path: Path, edge: list[dict]) -> None:
+    assert verify_task(EDGE, edge, tmp_path)["valid"] is True
+    rerun = scored(tmp_path, EDGE)  # every pair was scored by the first run: all skipped, none charged
+    assert sorted(rerun, key=lambda pair: (pair["a"], pair["b"])) == reference(EDGE)
+    verdict = verify_task(EDGE, rerun, tmp_path)
+    assert verdict["valid"] is True and verdict["score"] == 1.0
+    assert verdict["details"] == {"submitted": 22, "reference": 22, "scored": 186}

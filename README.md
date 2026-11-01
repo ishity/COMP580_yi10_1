@@ -12,7 +12,7 @@ checks and lifecycle.
 |---|---|---|
 | `describe_dataset` | Gives a dataset's keyword count, vector dimension, the hyperplanes LSH may use (256) and its pair count | `src/plugin/describe.py` |
 | `lsh_candidates` | Hashes every keyword with the first `bits_per_band × bands` hyperplanes, saves the candidate pairs (those sharing at least one band's signature) to `candidates/<run_id>.json` in the workspace, ranked by how many bands they share, and returns the run id, the count and a histogram by matched bands | `src/plugin/lsh.py` |
-| `score_pairs` | Scores a rank range of a saved run with the exact rule and returns the qualifying pairs with their integer dot product and squared lengths; records every call in `score_ledger.json` and refuses a range that would take the distinct scored pairs past the budget | `src/plugin/score.py` |
+| `score_pairs` | Scores a rank range of a saved run with the exact rule and returns the qualifying pairs with their integer dot product and squared lengths; records every call in the instance's ledger `ledgers/<dataset>-<threshold>-<budget>.json`, returns the skipped pairs an earlier call found qualifying as `previously_qualifying`, and refuses a range that would take the distinct scored pairs past the budget | `src/plugin/score.py` |
 | `exact_pairs` | Finds every qualifying pair by brute force: the task's reference, which the model never sees | `src/plugin/exact.py` |
 
 ### Tasks
@@ -30,20 +30,30 @@ compared as fractions: no floating point decides a pair. `src/plugin/rule.py` an
 hold the same rule, word for word.
 
 Candidate lists never pass through the model: a wide LSH run on `nlp-large` has tens of thousands of
-pairs. The agent sees only each run's histogram and asks `score_pairs` for rank ranges. The first
-`score_pairs` call fixes the ledger's dataset, threshold and budget. A pair any earlier call scored is
-skipped, not charged again, so the budget counts distinct pairs and a second LSH run costs only its
-new pairs. Every refused call says what was wrong and which value would be valid, for example the
-largest `count` the remaining budget allows.
+pairs. The agent sees only each run's histogram and asks `score_pairs` for rank ranges. A pair any earlier call scored is skipped, not charged again, so the
+budget counts distinct pairs and a second LSH run costs only its new pairs. Every refused call says
+what was wrong and which value would be valid, for example the largest `count` the remaining budget
+allows.
+
+NanoAgent copies a member's workspace files into every run and writes them back afterwards, so
+workspace files outlive a run. Each task instance therefore has its own ledger, named by the values
+it locks: `ledgers/<dataset>-<threshold>-<budget>.json`, the threshold written by value to 3 places
+(`0.8` and `0.80` both give `nlp-large-0.800-3000.json`). Different instances never share a ledger.
+A rerun of the same instance finds its earlier ledger: the pairs it scored before are skipped at no
+cost, and those that qualified come back in `previously_qualifying` with the integers recorded then,
+so the rerun can submit them. `src/plugin/ledgers.py` and `verifier/ledgers.py` hold the same naming
+code, word for word.
 
 `verify_task` checks, in order, and the first failure decides:
 
 1. Malformed: every pair names two distinct keywords of the dataset, and no pair is submitted twice,
    counting `(a, b)` and `(b, a)` as one.
-2. Budget: the ledger is for the task's dataset, threshold and budget, and its distinct scored pairs
-   are within the budget. A non-empty answer without a ledger fails.
+2. Budget: the instance's ledger, found by the task's dataset, threshold and budget, records those
+   same values, and its distinct scored pairs, over every run of the instance, are within the
+   budget. A non-empty answer without a ledger fails.
 3. Precision: every submitted pair is in the reference. Any false pair scores 0.
-4. Provenance: `score_pairs` returned every submitted pair as qualifying, with the reference's integers.
+4. Provenance: the ledger records every submitted pair as qualifying, with the reference's integers.
+   This holds for pairs a rerun got back in `previously_qualifying`, since an earlier call recorded them.
 5. Recall: `recall = |submitted| / |reference|` (1 for an empty answer to an empty reference). The
    result is valid when recall is at least `min_recall`, and its score is the recall.
 
@@ -76,7 +86,8 @@ It has the standard plugin layout, which NanoAgent requires:
 ├── .gitignore
 ├── .env             # needed environment variable names (none here)
 ├── src/plugin/      # the MCP server (__main__.py, its IMPLEMENTATIONS table), one module per tool,
-│                    # bundle.py (datasets and paths), rule.py (the exact rule) and data/ (the JSON)
+│                    # bundle.py (datasets and paths), rule.py (the exact rule), ledgers.py
+│                    # (ledger names) and data/ (the JSON)
 ├── tests/           # test_tools.py and test_verifier.py
 ├── ui/              # renderers.js and renderers.css: outputs are drawn from their JSON Schema
 ├── product/         # the product page a catalog shows: product.yaml and icon.svg
@@ -88,20 +99,25 @@ output against its own, and NanoAgent and the verifier get the same classes. A f
 and the MCP server returns an error result.
 
 `verifier/` is deterministic: it imports only the standard library and `contract`, and reads only
-the workspace's `candidates/` and `score_ledger.json`. Beyond the task check, it rederives every tool
+the workspace's `candidates/` and the instance's ledger in `ledgers/`. Beyond the task check, it rederives every tool
 call's meaning: the run id, the ranking and histogram against the saved candidates, and for each
-`score_pairs` call that the ledger scored exactly the range's new pairs, that the qualifying pairs
+`score_pairs` call that the ledger scored exactly the range's new pairs, that `previously_qualifying` is
+exactly the range's skipped pairs that earlier calls recorded as qualifying, that the qualifying pairs
 meet the rule by their own integers, and that the totals and remaining budget add up.
 
 ## Develop and run
 
 ```bash
+export UV_NO_CONFIG=1
 uv lock
 uv sync --extra dev
 uv run pytest
 uv run ruff check .
 uv lock --check
+UV_CACHE_DIR=$(mktemp -d) uv lock --check --offline
 ```
 
+`UV_NO_CONFIG=1` keeps a machine's own uv settings, such as `exclude-newer`, out of `uv.lock`.
+
 NanoAgent passes the folder the plugin may write to as `NANOAGENT_WORKSPACE`; `lsh_candidates`
-writes `candidates/<run_id>.json` there and `score_pairs` writes `score_ledger.json`.
+writes `candidates/<run_id>.json` there and `score_pairs` writes `ledgers/<dataset>-<threshold>-<budget>.json`.
